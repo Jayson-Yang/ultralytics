@@ -138,6 +138,7 @@ class DetectionTrainer(BaseTrainer):
                 seed=self.args.seed,
                 rank=r,
                 world_size=ws,
+                finite=mode == "val",
             )
             shuffle = False
             fr = [round(f, 4) for f in batch_sampler.fractions]
@@ -162,6 +163,7 @@ class DetectionTrainer(BaseTrainer):
             rank=rank if batch_sampler is None else -1,
             drop_last=self.args.compile and mode == "train",
             batch_sampler=batch_sampler,
+            infinite=mode == "train" or batch_sampler is None,
         )
 
     def preprocess_batch(self, batch: dict) -> dict:

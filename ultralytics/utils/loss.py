@@ -20,6 +20,36 @@ from .metrics import bbox_iou, probiou
 from .tal import bbox2dist, rbox2dist
 
 
+def _pack_targets_by_batch_idx(
+    targets: torch.Tensor,
+    batch_size: int,
+    device: torch.device,
+    scale_tensor: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Pack flat targets (col0 = image index) into (batch_size, max_objs, C).
+
+    Targets must be grouped by image index; stable-sort by batch_idx when they are not.
+    """
+    nl, ne = targets.shape
+    out_cols = ne - 1
+    if nl == 0:
+        return torch.zeros(batch_size, 0, out_cols, device=device)
+    batch_idx = targets[:, 0].long().clamp_(0, batch_size - 1)
+    order = batch_idx.argsort(stable=True)
+    targets = targets[order]
+    batch_idx = targets[:, 0].long()
+    _, counts = batch_idx.unique(return_counts=True)
+    out = torch.zeros(batch_size, counts.max(), out_cols, device=device)
+    offsets = torch.zeros(batch_size + 1, dtype=torch.long, device=device)
+    offsets.scatter_add_(0, batch_idx + 1, torch.ones_like(batch_idx))
+    offsets = offsets.cumsum(0)
+    within_idx = torch.arange(nl, device=device) - offsets[batch_idx]
+    out[batch_idx, within_idx] = targets[:, 1:]
+    if scale_tensor is not None:
+        out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
+    return out
+
+
 class VarifocalLoss(nn.Module):
     """Varifocal loss by Zhang et al.
 
@@ -388,21 +418,7 @@ class v8DetectionLoss:
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
-        nl, ne = targets.shape
-        if nl == 0:
-            out = torch.zeros(batch_size, 0, ne - 1, device=self.device)
-        else:
-            batch_idx = targets[:, 0].long()  # image index
-            _, counts = batch_idx.unique(return_counts=True)
-            counts = counts.to(dtype=torch.int32)
-            out = torch.zeros(batch_size, counts.max(), ne - 1, device=self.device)
-            offsets = torch.zeros(batch_size + 1, dtype=torch.long, device=self.device)
-            offsets.scatter_add_(0, batch_idx + 1, torch.ones_like(batch_idx))
-            offsets = offsets.cumsum(0)
-            within_idx = torch.arange(nl, device=self.device) - offsets[batch_idx]
-            out[batch_idx, within_idx] = targets[:, 1:]
-            out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
-        return out
+        return _pack_targets_by_batch_idx(targets, batch_size, self.device, scale_tensor)
 
     def bbox_decode(self, anchor_points: torch.Tensor, pred_dist: torch.Tensor) -> torch.Tensor:
         """Decode predicted object bounding box coordinates from anchor points and distribution."""
@@ -742,12 +758,15 @@ class v8PoseLoss(v8DetectionLoss):
             (batch_size, max_kpts, keypoints.shape[1], keypoints.shape[2]), device=keypoints.device
         )
 
-        # Vectorized fill: compute within-batch position for each keypoint using cumulative offsets
-        batch_idx_long = batch_idx.long()
+        # Vectorized fill: stable-sort by image index so within-image positions are contiguous
+        batch_idx_long = batch_idx.long().clamp_(0, batch_size - 1)
+        order = batch_idx_long.argsort(stable=True)
+        batch_idx_long = batch_idx_long[order]
+        keypoints = keypoints[order]
         offsets = torch.zeros(batch_size + 1, dtype=torch.long, device=keypoints.device)
         offsets.scatter_add_(0, batch_idx_long + 1, torch.ones_like(batch_idx_long))
         offsets = offsets.cumsum(0)
-        within_idx = torch.arange(len(batch_idx), device=keypoints.device) - offsets[batch_idx_long]
+        within_idx = torch.arange(len(batch_idx_long), device=keypoints.device) - offsets[batch_idx_long]
         batched_keypoints[batch_idx_long, within_idx] = keypoints
 
         # Expand dimensions of target_gt_idx to match the shape of batched_keypoints
@@ -1017,20 +1036,10 @@ class v8OBBLoss(v8DetectionLoss):
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets for oriented bounding box detection."""
         if targets.shape[0] == 0:
-            out = torch.zeros(batch_size, 0, 6, device=self.device)
-        else:
-            batch_idx = targets[:, 0].long()  # image index
-            _, counts = batch_idx.unique(return_counts=True)
-            counts = counts.to(dtype=torch.int32)
-            out = torch.zeros(batch_size, counts.max(), 6, device=self.device)
-            packed_targets = targets[:, 1:].clone()
-            packed_targets[:, 1:5].mul_(scale_tensor)
-            offsets = torch.zeros(batch_size + 1, dtype=torch.long, device=self.device)
-            offsets.scatter_add_(0, batch_idx + 1, torch.ones_like(batch_idx))
-            offsets = offsets.cumsum(0)
-            within_idx = torch.arange(len(targets), device=self.device) - offsets[batch_idx]
-            out[batch_idx, within_idx] = packed_targets
-        return out
+            return torch.zeros(batch_size, 0, 6, device=self.device)
+        packed = targets.clone()
+        packed[:, 1:5].mul_(scale_tensor)
+        return _pack_targets_by_batch_idx(packed, batch_size, self.device, scale_tensor=None)
 
     def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate and return the loss for oriented bounding box detection."""

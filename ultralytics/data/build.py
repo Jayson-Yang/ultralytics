@@ -238,7 +238,7 @@ def build_yolo_dataset(
     batch: int,
     data: dict[str, Any],
     mode: str = "train",
-    rect: bool = False,
+    rect: bool | None = None,
     stride: int = 32,
     multi_modal: bool = False,
     fraction: float | None = None,
@@ -267,7 +267,7 @@ def build_yolo_dataset(
         batch_size=batch,
         augment=mode == "train",
         hyp=cfg,
-        rect=cfg.rect or rect,
+        rect=cfg.rect if rect is None else rect,
         cache=cfg.cache or None,
         single_cls=cfg.single_cls or False,
         stride=stride,
@@ -320,8 +320,9 @@ def build_dataloader(
     drop_last: bool = False,
     pin_memory: bool = True,
     batch_sampler=None,
-) -> InfiniteDataLoader:
-    """Create and return an InfiniteDataLoader for training or validation.
+    infinite: bool = True,
+) -> InfiniteDataLoader | dataloader.DataLoader:
+    """Create and return a DataLoader for training or validation.
 
     Args:
         dataset (Dataset): Dataset to load data from.
@@ -332,9 +333,10 @@ def build_dataloader(
         drop_last (bool, optional): Whether to drop the last incomplete batch.
         pin_memory (bool, optional): Whether to use pinned memory for dataloader.
         batch_sampler (torch.utils.data.Sampler, optional): Custom batch sampler; disables shuffle and built-in sampler.
+        infinite (bool, optional): If False, return a standard finite DataLoader (recommended for validation).
 
     Returns:
-        (InfiniteDataLoader): A dataloader that can be used for training or validation.
+        (InfiniteDataLoader | DataLoader): Dataloader for training or validation.
 
     Examples:
         Create a dataloader for training
@@ -352,7 +354,7 @@ def build_dataloader(
     if batch_sampler is not None:
         # Lower prefetch to reduce RAM use when workers decode large images in parallel
         prefetch_factor = 2 if nw > 0 else None
-        return InfiniteDataLoader(
+        loader_kwargs = dict(
             dataset=dataset,
             batch_sampler=batch_sampler,
             num_workers=nw,
@@ -361,6 +363,9 @@ def build_dataloader(
             collate_fn=collate_fn,
             worker_init_fn=seed_worker,
         )
+        if infinite:
+            return InfiniteDataLoader(**loader_kwargs)
+        return dataloader.DataLoader(**loader_kwargs)
 
     batch = min(batch, len(dataset))
     sampler = (

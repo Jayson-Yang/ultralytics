@@ -107,6 +107,7 @@ class ProportionalBatchSampler(Sampler[list[int]]):
         seed: int = 0,
         rank: int = 0,
         world_size: int = 1,
+        finite: bool = False,
     ) -> None:
         if len(index_pools) != len(fractions):
             raise ValueError(
@@ -119,9 +120,10 @@ class ProportionalBatchSampler(Sampler[list[int]]):
         self.fractions = normalize_fractions(fractions)
         self.batch_size = int(batch_size)
         self.seed = seed
-        self.rank = rank
+        self.rank = rank if rank >= 0 else 0  # -1 = single-process (val / non-DDP)
         self.world_size = max(world_size, 1)
         self.epoch = 0
+        self.finite = finite
         self.dataset_size = sum(len(p) for p in index_pools)
 
     def set_epoch(self, epoch: int) -> None:
@@ -142,13 +144,19 @@ class ProportionalBatchSampler(Sampler[list[int]]):
         return batch
 
     def __iter__(self):
-        """Yield batch index lists indefinitely (for InfiniteDataLoader)."""
+        """Yield batch index lists; finite mode stops after ``len(self)`` batches (validation)."""
         rng = self._rng()
         batch_count = 0
+        yielded = 0
+        n_batches = len(self) if self.finite else None
         while True:
             batch = self._sample_batch(rng)
             if batch_count % self.world_size == self.rank:
                 yield batch
+                if self.finite:
+                    yielded += 1
+                    if yielded >= n_batches:
+                        return
             batch_count += 1
 
     def __len__(self) -> int:

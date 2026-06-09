@@ -360,13 +360,14 @@ class DetectionValidator(BaseValidator):
                 fractions,
                 batch_size=batch_size,
                 seed=getattr(self.args, "seed", 0),
-                rank=-1,
+                rank=0,
                 world_size=1,
+                finite=True,
             )
             fr = [round(f, 4) for f in batch_sampler.fractions]
             LOGGER.info(
                 f"{colorstr('balanced:')} ProportionalBatchSampler (val) | datasets={sizes} fractions={fr} "
-                f"batch={batch_size}"
+                f"batch={batch_size} batches={len(batch_sampler)}"
             )
         return build_dataloader(
             dataset,
@@ -377,6 +378,7 @@ class DetectionValidator(BaseValidator):
             drop_last=self.args.compile,
             pin_memory=self.training,
             batch_sampler=batch_sampler,
+            infinite=not fractions,
         )
 
     def plot_val_samples(self, batch: dict[str, Any], ni: int) -> None:
