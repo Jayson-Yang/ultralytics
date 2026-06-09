@@ -22,8 +22,13 @@ names:
 # 例：batch=16 且比例 [0.25, 0.75] → 每批约 4 张来自 A，12 张来自 B
 # 不写 val_dataset_fractions 时，验证遍历各 val 集的全部图片
 # 三个数据集示例：train: [A, B, C]  train_dataset_fractions: [0.2, 0.3, 0.5]
-train_dataset_fractions: [0.75, 0.25]
-val_dataset_fractions: [0.75, 0.25]
+train_dataset_fractions: [0.65, 0.35]  # 略提高 WIDER_FACE 采样，利于 face / WIDER AP
+# val_dataset_fractions: [0.75, 0.25]
+
+# 分类 loss 按类加权（顺序同 names）；face=1.0 不压低，其余类降权把梯度让给 face
+# 优先级：phonecall(1.0) > body(0.75) > head/cellphone(0.55)
+# 调参约束：非 face 四类看 YOLO val 的 AP50（metrics.box.ap50），跌幅 ≤5%；face 看 WIDER 官方 Easy AP（主）/ Medium / Hard
+class_weights: [0.55, 0.75, 1.0, 0.55, 1.0]
 
 # Download script/URL (optional)
 # download: https://github.com/ultralytics/assets/releases/download/v0.0.0/coco8.zip

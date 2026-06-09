@@ -240,25 +240,55 @@ class DetectionTrainer(BaseTrainer):
         if getattr(self.model, "end2end", False):
             self.model.set_head_attr(max_det=self.args.max_det)
 
-    def set_class_weights(self):
-        """Compute and set class weights for handling class imbalance.
-
-        Class weights are computed based on inverse class frequency in the training dataset,
-        raised to the power of cls_pw (0 < cls_pw <= 1 dampens, cls_pw > 1 amplifies).
-        Final weights are normalized so their mean equals 1.0.
-        """
-        assert 0 <= self.args.cls_pw <= 1.0, "cls_pw must be in the range [0, 1]"
-        if self.args.cls_pw == 0.0:
-            return
+    def _frequency_class_weights(self) -> np.ndarray:
+        """Inverse-frequency class weights raised to ``cls_pw``."""
         labels = iter_dataset_labels(self.train_loader.dataset)
         classes = np.concatenate([lb["cls"].flatten() for lb in labels], 0)
         class_counts = np.bincount(classes.astype(int), minlength=self.data["nc"]).astype(np.float32)
         class_counts = np.where(class_counts == 0, 1.0, class_counts)
+        return (1.0 / class_counts) ** self.args.cls_pw
 
-        weights = (1.0 / class_counts) ** self.args.cls_pw  # apply power directly
-        weights = weights / weights.mean()  # normalize so mean equals 1.0
+    def _manual_class_weights(self) -> np.ndarray | None:
+        """Parse optional per-class multipliers from the data YAML ``class_weights`` key."""
+        raw = self.data.get("class_weights")
+        if raw is None:
+            return None
+        weights = np.asarray([float(x) for x in raw], dtype=np.float32)
+        if len(weights) != self.data["nc"]:
+            raise ValueError(
+                f"class_weights length {len(weights)} must match nc={self.data['nc']} "
+                f"({list(self.data['names'].values())})"
+            )
+        if np.any(weights <= 0):
+            raise ValueError(f"class_weights must be positive, got {raw}")
+        return weights
+
+    def set_class_weights(self):
+        """Set per-class classification loss multipliers on the model.
+
+        Priority order:
+        1. ``class_weights`` in data YAML (manual per-class priorities).
+        2. If ``cls_pw`` > 0, multiply by inverse-frequency weights from the train set.
+        3. If only ``cls_pw`` > 0 and no manual weights, use frequency weights alone.
+        Final weights are normalized so their mean equals 1.0.
+        """
+        assert 0 <= self.args.cls_pw <= 1.0, "cls_pw must be in the range [0, 1]"
+        manual = self._manual_class_weights()
+        if manual is not None:
+            weights = manual.copy()
+            if self.args.cls_pw > 0:
+                weights *= self._frequency_class_weights()
+            weights = weights / weights.mean()
+            self.model.class_weights = torch.from_numpy(weights).to(self.device)
+            named = {self.data["names"][i]: round(float(w), 3) for i, w in enumerate(weights)}
+            LOGGER.info(f"Class weights (manual): {named}")
+            return
+        if self.args.cls_pw == 0.0:
+            return
+        weights = self._frequency_class_weights()
+        weights = weights / weights.mean()
         self.model.class_weights = torch.from_numpy(weights).to(self.device)
-        LOGGER.info(f"Class weights: {self.model.class_weights.cpu().numpy().round(3)}")
+        LOGGER.info(f"Class weights (frequency, cls_pw={self.args.cls_pw}): {weights.round(3)}")
 
     def get_model(self, cfg: str | None = None, weights: str | None = None, verbose: bool = True):
         """Return a YOLO detection model.
