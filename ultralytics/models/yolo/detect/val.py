@@ -16,6 +16,13 @@ from ultralytics.engine.validator import BaseValidator
 from ultralytics.utils import LOGGER, RANK, colorstr, nms, ops
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
+from ultralytics.utils.widerface_eval import (
+    build_stem_to_event_map,
+    evaluate_widerface,
+    resolve_wider_event_stem,
+    resolve_wider_gt_dir,
+    xyxy2xywh_tl,
+)
 from ultralytics.utils.plotting import plot_images
 
 
@@ -100,6 +107,7 @@ class DetectionValidator(BaseValidator):
         self.metrics.clear_stats()
         self.metrics.clear_image_metrics()
         self.confusion_matrix = ConfusionMatrix(names=model.names, save_matches=self.args.plots and self.args.visualize)
+        self._init_wider_eval()
 
     def get_desc(self) -> str:
         """Return a formatted string summarizing class metrics of YOLO model."""
@@ -205,11 +213,15 @@ class DetectionValidator(BaseValidator):
                     )
 
             if no_pred:
+                if self.wider_eval_enabled:
+                    self._collect_wider_preds(predn, pbatch)
                 continue
 
             # Save
-            if self.args.save_json or self.args.save_txt:
+            if self.args.save_json or self.args.save_txt or self.wider_eval_enabled:
                 predn_scaled = self.scale_preds(predn, pbatch)
+            if self.wider_eval_enabled:
+                self._collect_wider_preds(predn_scaled, pbatch)
             if self.args.save_json:
                 self.pred_to_json(predn_scaled, pbatch)
             if self.args.save_txt:
@@ -256,14 +268,22 @@ class DetectionValidator(BaseValidator):
             self.jdict = []
             for jdict in gathered_jdict:
                 self.jdict.extend(jdict)
+            gathered_wider = [None] * dist.get_world_size()
+            dist.gather_object(getattr(self, "wider_preds", {}), gathered_wider, dst=0)
+            self.wider_preds = {}
+            for preds in gathered_wider:
+                if preds:
+                    self.wider_preds.update(preds)
             self.metrics.stats = merged_stats
             self._gather_image_metrics(self.metrics.box)
             self.seen = len(self.dataloader.dataset)  # total image count from dataset
         elif RANK > 0:
             dist.gather_object(self.metrics.stats, None, dst=0)
             dist.gather_object(self.jdict, None, dst=0)
+            dist.gather_object(getattr(self, "wider_preds", {}), None, dst=0)
             self._gather_image_metrics(self.metrics.box)
             self.jdict = []
+            self.wider_preds = {}
             self.metrics.clear_stats()
 
     def get_stats(self) -> dict[str, Any]:
@@ -274,7 +294,14 @@ class DetectionValidator(BaseValidator):
         """
         self.metrics.process(save_dir=self.save_dir, plot=self.args.plots, on_plot=self.on_plot)
         self.metrics.clear_stats()
-        return self.metrics.results_dict
+        stats = self.metrics.results_dict
+        if self.wider_eval_enabled:
+            wider_stats = self.eval_widerface()
+            if wider_stats:
+                stats.update(wider_stats)
+                if self.data.get("wider_fitness"):
+                    stats["fitness"] = wider_stats["metrics/wider_easy_ap"]
+        return stats
 
     def print_results(self) -> None:
         """Print training/validation set metrics per class."""
@@ -295,6 +322,72 @@ class DetectionValidator(BaseValidator):
                         *self.metrics.class_result(i),
                     )
                 )
+
+        if getattr(self, "wider_last_ap", None):
+            easy, medium, hard = self.wider_last_ap
+            LOGGER.info("WIDER FACE Val AP: Easy=%.3f  Medium=%.3f  Hard=%.3f", easy, medium, hard)
+
+    def _init_wider_eval(self) -> None:
+        """Initialize WIDER FACE official AP evaluation from data YAML."""
+        self.wider_eval_enabled = bool(self.data.get("wider_eval", False))
+        self.wider_face_class = int(self.data.get("wider_face_class", 4))
+        self.wider_image_filter = str(self.data.get("wider_image_filter", "WIDER_FACE"))
+        self.wider_gt_dir = resolve_wider_gt_dir(self.data) if self.wider_eval_enabled else None
+        self.wider_preds: dict[tuple[str, str], np.ndarray] = {}
+        self.wider_stem_to_event: dict[str, str] = {}
+        self.wider_unmapped_stems = 0
+        self.wider_last_ap = None
+        if self.wider_eval_enabled and self.wider_gt_dir is not None:
+            try:
+                self.wider_stem_to_event = build_stem_to_event_map(self.wider_gt_dir)
+                LOGGER.info(f"WIDER FACE: loaded {len(self.wider_stem_to_event)} stem->event mappings from GT")
+            except Exception as e:
+                LOGGER.warning(f"Failed to load WIDER stem->event map: {e}")
+        if self.wider_eval_enabled and self.wider_gt_dir is None:
+            LOGGER.warning(
+                "wider_eval=True but wider_gt_dir not found. "
+                "Set wider_gt_dir in data YAML to the folder containing wider_face_val.mat."
+            )
+            self.wider_eval_enabled = False
+
+    def _collect_wider_preds(self, predn: dict[str, torch.Tensor], pbatch: dict[str, Any]) -> None:
+        """Collect face detections for WIDER FACE official evaluation."""
+        im_file = Path(pbatch["im_file"])
+        if self.wider_image_filter not in im_file.as_posix():
+            return
+        key = resolve_wider_event_stem(im_file, self.wider_stem_to_event)
+        if key is None:
+            self.wider_unmapped_stems += 1
+            return
+        event, stem = key
+        mask = predn["cls"] == self.wider_face_class
+        if not mask.any():
+            self.wider_preds[(event, stem)] = np.zeros((0, 5), dtype=np.float32)
+            return
+        bboxes = predn["bboxes"][mask].detach().cpu().numpy()
+        conf = predn["conf"][mask].detach().cpu().numpy()
+        # Official WIDER toolkit expects top-left xywh, not YOLO center xywh.
+        xywh = xyxy2xywh_tl(bboxes)
+        self.wider_preds[(event, stem)] = np.column_stack([xywh, conf]).astype(np.float32)
+
+    def eval_widerface(self) -> dict[str, float]:
+        """Run WIDER FACE Easy/Medium/Hard AP using collected predictions."""
+        if not self.wider_preds or self.wider_gt_dir is None:
+            return {}
+        try:
+            if self.wider_unmapped_stems:
+                LOGGER.warning(f"WIDER FACE: {self.wider_unmapped_stems} val images could not map stem->event")
+            LOGGER.info(f"\nEvaluating WIDER FACE AP (gt={self.wider_gt_dir}, preds={len(self.wider_preds)} images)...")
+            stats = evaluate_widerface(self.wider_preds, self.wider_gt_dir)
+            self.wider_last_ap = (
+                stats["metrics/wider_easy_ap"],
+                stats["metrics/wider_medium_ap"],
+                stats["metrics/wider_hard_ap"],
+            )
+            return stats
+        except Exception as e:
+            LOGGER.warning(f"WIDER FACE evaluation failed: {e}")
+            return {}
 
     def _process_batch(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> dict[str, np.ndarray]:
         """Return correct prediction matrix.

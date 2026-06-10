@@ -30,5 +30,13 @@ train_dataset_fractions: [0.65, 0.35]  # 略提高 WIDER_FACE 采样，利于 fa
 # 调参约束：非 face 四类看 YOLO val 的 AP50（metrics.box.ap50），跌幅 ≤5%；face 看 WIDER 官方 Easy AP（主）/ Medium / Hard
 class_weights: [0.55, 0.75, 1.0, 0.55, 1.0]
 
+# WIDER FACE 官方评测（val 结束后自动计算 Easy/Medium/Hard AP，写入 results.csv）
+# 需准备官方 GT：wider_face_val.mat + wider_easy/medium/hard_val.mat（见 WIDER 官网 eval_tools）
+wider_eval: true
+wider_gt_dir: WIDER_FACE/wider_face_split  # 相对 path；含四个 .mat 文件
+wider_face_class: 4                         # names 中 face 的类别 id
+wider_image_filter: WIDER_FACE-coco8        # 仅对 val 路径含该子串的图片做 WIDER 评测
+# wider_fitness: true                       # 用 Easy AP 作为 fitness（早停/最佳权重）；Katib 主目标可直读 metrics/wider_easy_ap
+
 # Download script/URL (optional)
 # download: https://github.com/ultralytics/assets/releases/download/v0.0.0/coco8.zip

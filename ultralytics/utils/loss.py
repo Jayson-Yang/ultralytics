@@ -39,12 +39,14 @@ def _pack_targets_by_batch_idx(
     targets = targets[order]
     batch_idx = targets[:, 0].long()
     _, counts = batch_idx.unique(return_counts=True)
-    out = torch.zeros(batch_size, counts.max(), out_cols, device=device)
-    offsets = torch.zeros(batch_size + 1, dtype=torch.long, device=device)
-    offsets.scatter_add_(0, batch_idx + 1, torch.ones_like(batch_idx))
-    offsets = offsets.cumsum(0)
-    within_idx = torch.arange(nl, device=device) - offsets[batch_idx]
-    out[batch_idx, within_idx] = targets[:, 1:]
+    max_objs = int(counts.max())
+    out = torch.zeros(batch_size, max_objs, out_cols, device=device)
+    # Per-image write avoids CUDA advanced-indexing failures on very large WIDER_FACE batches.
+    for b in range(batch_size):
+        mask = batch_idx == b
+        if mask.any():
+            n = int(mask.sum())
+            out[b, :n] = targets[mask, 1:]
     if scale_tensor is not None:
         out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
     return out

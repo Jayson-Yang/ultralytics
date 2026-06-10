@@ -1,0 +1,67 @@
+# Katib Experiment 中需设置：
+#   objectiveMetricName: wider_easy_ap
+#   type: maximize
+# metrics.log 由 katib_train_mutli-widerface.py 写入，格式示例：
+#   epoch=1 wider_easy_ap=0.824852 wider_medium_ap=0.790912 wider_hard_ap=0.604569
+# data yaml 需开启 wider_eval: true 且 val 含 WIDER_FACE，否则 wider_easy_ap 恒为 0
+
+apiVersion: batch/v1
+kind: Job
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      annotations:
+        "sidecar.istio.io/inject": "false"
+    spec:
+      containers:
+        - name: training-container
+          image: harbor.solution.com/yangjx14/katib_yolo:1.3
+          command:
+          - "python3"
+          - "/katib/katib_experiment_dev/katib_train_mutli-widerface.py"
+          - "--model=/katib/ultralytics/ultralytics/cfg/models/11/yolo11s.yaml"
+          - "--data=/katib/ultralytics/ultralytics/cfg/datasets/coco8-katib-multi.yaml"
+          - "--epochs=150"
+          - "--imgsz=640"
+          - "--device=0"
+          - "--workers=4"
+          - "--cache"
+          - "--patience=100"
+          - "--lr=${trialParameters.learningRate}"
+          - "--batch=${trialParameters.batchSize}"
+          - "--optimizer=${trialParameters.optimizer}"
+          - "--pretrained=/katib/ultralytics/yolo11s.pt"
+          - "--focal_loss"
+          - "--dump_batches_dir=/katib/datasets/train_sampler_preview"
+          - "--project=/katib/output/detect"
+          resources:
+            limits:
+              memory: "128Gi"
+              cpu: "8"
+              ephemeral-storage: "150Gi"
+              nvidia.com/gpu: 1
+            requests:
+              memory: "128Gi"
+              cpu: "8"
+              ephemeral-storage: "150Gi"
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: katib-experiment
+              mountPath: /katib
+            - name: datasets
+              mountPath: /katib/datasets
+            - name: dshm
+              mountPath: /dev/shm
+      restartPolicy: Never
+      volumes:
+        - name: katib-experiment
+          persistentVolumeClaim:
+            claimName: katib-experiment
+        - name: datasets
+          persistentVolumeClaim:
+            claimName: datasets
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi

@@ -306,6 +306,13 @@ class DetectionTrainer(BaseTrainer):
             model.load(weights)
         return model
 
+    def _setup_train(self):
+        """Extend metric keys when WIDER FACE official AP is enabled."""
+        super()._setup_train()
+        if RANK in {-1, 0} and self.data.get("wider_eval"):
+            for k in ("metrics/wider_easy_ap", "metrics/wider_medium_ap", "metrics/wider_hard_ap"):
+                self.metrics.setdefault(k, 0)
+
     def get_validator(self):
         """Return a DetectionValidator for YOLO model validation."""
         self.loss_names = "box_loss", "cls_loss", "dfl_loss"

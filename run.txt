@@ -1,8 +1,17 @@
-# pip install -e .
-
-# 与原先训练一致（BCE cls loss，无 focal_loss）；仅通过 data YAML 的 class_weights / train_dataset_fractions 调权
-yolo detect train data=./ultralytics/cfg/datasets/coco8-multitaskdet2.yaml model=yolo11s.yaml pretrained=yolo11s.pt epochs=100 imgsz=640 batch=16 workers=4 cls_pw=0
-
-# 可选：dump 训练 batch 预览
-# yolo detect train ... dump_batches_dir=runs/sampler_preview
-
+# pip install -e .
+
+# ---------- 本地验证 WIDER AP（推荐先跑这个）----------
+# 或手动 CLI — 仅 val（用已有权重，最快验证 WIDER Easy AP）:
+yolo detect val model=92-adam-multitaskv2-widerface-baseA.pt data=./ultralytics/cfg/datasets/coco8-multitaskdet2.yaml imgsz=640 batch=8 workers=4 project=runs/verify name=wider_val exist_ok=True
+
+# 或手动 CLI — 短训 2 epoch（验证 results.csv 写入 metrics/wider_easy_ap）:
+yolo detect train data=./ultralytics/cfg/datasets/coco8-multitaskdet2.yaml model=yolo11s.yaml pretrained=yolo11s.pt epochs=2 imgsz=640 batch=8 workers=4 cls_pw=0 project=runs/verify name=wider_train exist_ok=True
+
+# ---------- 正式训练（与原先一致，BCE cls loss，无 focal_loss）----------
+# val 结束会额外输出 WIDER Easy/Medium/Hard AP -> results.csv 列 metrics/wider_easy_ap 等
+yolo detect train data=./ultralytics/cfg/datasets/coco8-multitaskdet2.yaml model=yolo11s.yaml pretrained=yolo11s.pt epochs=100 imgsz=640 batch=16 workers=4 cls_pw=0
+
+
+
+# 可选：dump 训练 batch 预览
+# yolo detect train ... dump_batches_dir=runs/sampler_preview
