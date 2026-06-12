@@ -1,0 +1,40 @@
+# coco8-katib-multi-stage2-MultiTask_v2-WIDER_Face.yaml
+# path: /home/jovyan/datasets
+path: /katib/datasets
+train:
+  - MultiTask_v2/images/train      # dataset A: ~1万，5类
+  - WIDER_FACE/images/train  # dataset B: ~10万，主要 face
+
+val:
+  - MultiTask_v2/images/val
+  - WIDER_FACE/images/val  # dataset B: ~10万，主要 face
+
+test: # test images (optional)
+
+# Classes
+names:
+  0: head
+  1: body
+  2: phonecall
+  3: cellphone
+  4: face
+
+# 每个 train/val 路径的采样比例（与列表顺序一致，可写小数，会自动归一化）
+# 例：batch=16 且比例 [0.25, 0.75] → 每批约 4 张来自 A，12 张来自 B
+# 不写 val_dataset_fractions 时，验证遍历各 val 集的全部图片
+# 三个数据集示例：train: [A, B, C]  train_dataset_fractions: [0.2, 0.3, 0.5]
+train_dataset_fractions: [0.65, 0.35]  # 略提高 WIDER_FACE 采样，利于 face / WIDER AP
+# val_dataset_fractions: [0.75, 0.25]
+
+# 分类 loss 按类加权（顺序同 names）；face=1.0 不压低，其余类降权把梯度让给 face
+# 优先级：phonecall(1.0) > body(0.75) > head/cellphone(0.55)
+# 调参约束：非 face 四类看 YOLO val 的 AP50（metrics.box.ap50），跌幅 ≤5%；face 看 WIDER 官方 Easy AP（主）/ Medium / Hard
+class_weights: [0.55, 0.75, 1.0, 0.55, 1.0]
+
+# WIDER FACE 官方评测（val 结束后自动计算 Easy/Medium/Hard AP，写入 results.csv）
+# 需准备官方 GT：wider_face_val.mat + wider_easy/medium/hard_val.mat（见 WIDER 官网 eval_tools）
+wider_eval: true
+wider_gt_dir: WIDER_FACE/wider_face_split  # 相对 path；含四个 .mat 文件
+wider_face_class: 4                         # names 中 face 的类别 id
+wider_image_filter: WIDER_FACE        # 仅对 val 路径含该子串的图片做 WIDER 评测
+# wider_fitness: true                       # 用 Easy AP 作为 fitness（早停/最佳权重）；Katib 主目标可直读 metrics/wider_easy_ap

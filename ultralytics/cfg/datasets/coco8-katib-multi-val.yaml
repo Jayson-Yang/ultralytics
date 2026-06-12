@@ -1,12 +1,14 @@
-# coco8-katib-multi.yaml
+# coco8-katib-multi-val.yaml
 # path: /home/jovyan/datasets
-path: /katib/datasets
+path: /home/jovyan/datasets
 train:
-  - MultiTask_v2/images/train      # dataset A: ~1万，5类
+  - APY_FaceSet/images/train      # dataset A: ~1万，5类
   - WIDER_FACE/images/train  # dataset B: ~10万，主要 face
 
 val:
-  - MultiTask_v2/images/val
+  - APY_FaceSet/images/val
+  - WIDER_FACE/images/val
+  # - MultiTask_v2/images/val
 
 test: # test images (optional)
 
@@ -18,10 +20,12 @@ names:
   3: cellphone
   4: face
 
-# 每个 train 路径的采样比例（与 train 列表顺序一致，可写小数，会自动归一化）
+# 每个 train/val 路径的采样比例（与列表顺序一致，可写小数，会自动归一化）
 # 例：batch=16 且比例 [0.25, 0.75] → 每批约 4 张来自 A，12 张来自 B
+# 不写 val_dataset_fractions 时，验证遍历各 val 集的全部图片
 # 三个数据集示例：train: [A, B, C]  train_dataset_fractions: [0.2, 0.3, 0.5]
-train_dataset_fractions: [0.95, 0.05]
+train_dataset_fractions: [0.70, 0.30]
+# val_dataset_fractions: [0.70, 0.30]
 
 # Download script/URL (optional)
 # download: https://github.com/ultralytics/assets/releases/download/v0.0.0/coco8.zip
