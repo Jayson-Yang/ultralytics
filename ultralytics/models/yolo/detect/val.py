@@ -13,15 +13,19 @@ import torch.distributed as dist
 from ultralytics.data import YOLOConcatDataset, build_dataloader, build_yolo_dataset, converter
 from ultralytics.data.sampler import ProportionalBatchSampler, get_concat_index_pools, get_dataset_fractions
 from ultralytics.engine.validator import BaseValidator
-from ultralytics.utils import LOGGER, RANK, colorstr, nms, ops
+from ultralytics.utils import LOGGER, RANK, TQDM, colorstr, nms, ops
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
 from ultralytics.utils.widerface_eval import (
     build_stem_to_event_map,
+    count_matched_preds,
     evaluate_widerface,
     resolve_wider_event_stem,
     resolve_wider_gt_dir,
+    resolve_wider_val_dir,
+    wider_gt_image_count,
     xyxy2xywh_tl,
+    _load_gt_mat_to_lists,
 )
 from ultralytics.utils.plotting import plot_images
 
@@ -107,6 +111,7 @@ class DetectionValidator(BaseValidator):
         self.metrics.clear_stats()
         self.metrics.clear_image_metrics()
         self.confusion_matrix = ConfusionMatrix(names=model.names, save_matches=self.args.plots and self.args.visualize)
+        self._val_model = model
         self._init_wider_eval()
 
     def get_desc(self) -> str:
@@ -296,6 +301,7 @@ class DetectionValidator(BaseValidator):
         self.metrics.clear_stats()
         stats = self.metrics.results_dict
         if self.wider_eval_enabled:
+            self._maybe_run_wider_sidecar()
             wider_stats = self.eval_widerface()
             if wider_stats:
                 stats.update(wider_stats)
@@ -331,16 +337,24 @@ class DetectionValidator(BaseValidator):
         """Initialize WIDER FACE official AP evaluation from data YAML."""
         self.wider_eval_enabled = bool(self.data.get("wider_eval", False))
         self.wider_face_class = int(self.data.get("wider_face_class", 4))
-        self.wider_image_filter = str(self.data.get("wider_image_filter", "WIDER_FACE"))
         self.wider_gt_dir = resolve_wider_gt_dir(self.data) if self.wider_eval_enabled else None
+        self.wider_val_dir = resolve_wider_val_dir(self.data) if self.wider_eval_enabled else None
+        self.wider_gt_event_list: list[str] = []
+        self.wider_gt_file_list: list[list[str]] = []
+        self.wider_gt_total = 0
         self.wider_preds: dict[tuple[str, str], np.ndarray] = {}
         self.wider_stem_to_event: dict[str, str] = {}
         self.wider_unmapped_stems = 0
         self.wider_last_ap = None
         if self.wider_eval_enabled and self.wider_gt_dir is not None:
             try:
+                self.wider_gt_event_list, self.wider_gt_file_list, _, _ = _load_gt_mat_to_lists(self.wider_gt_dir)
+                self.wider_gt_total = sum(len(stems) for stems in self.wider_gt_file_list)
                 self.wider_stem_to_event = build_stem_to_event_map(self.wider_gt_dir)
-                LOGGER.info(f"WIDER FACE: loaded {len(self.wider_stem_to_event)} stem->event mappings from GT")
+                LOGGER.info(
+                    f"WIDER FACE: loaded {len(self.wider_stem_to_event)} stem->event mappings "
+                    f"({self.wider_gt_total} official val images)"
+                )
             except Exception as e:
                 LOGGER.warning(f"Failed to load WIDER stem->event map: {e}")
         if self.wider_eval_enabled and self.wider_gt_dir is None:
@@ -349,15 +363,61 @@ class DetectionValidator(BaseValidator):
                 "Set wider_gt_dir in data YAML to the folder containing wider_face_val.mat."
             )
             self.wider_eval_enabled = False
+        elif self.wider_eval_enabled and self.wider_val_dir:
+            LOGGER.info(f"WIDER FACE: sidecar val images at {self.wider_val_dir}")
+
+    def _wider_inline_matched(self) -> int:
+        """Count WIDER GT images matched by predictions collected during the main val loop."""
+        if not self.wider_gt_event_list:
+            return 0
+        matched, _, _ = count_matched_preds(self.wider_gt_event_list, self.wider_gt_file_list, self.wider_preds)
+        return matched
+
+    def _maybe_run_wider_sidecar(self) -> None:
+        """Run extra inference on wider_val when main val set does not cover WIDER GT images."""
+        if not self.wider_eval_enabled or self.wider_gt_dir is None:
+            return
+        inline = self._wider_inline_matched()
+        total = self.wider_gt_total or wider_gt_image_count(self.wider_gt_dir)
+        min_inline = max(100, int(total * 0.5))
+        if inline >= min_inline:
+            LOGGER.info(f"WIDER FACE: main val aligned {inline}/{total} GT images, sidecar not needed")
+            return
+        if self.wider_val_dir is None:
+            LOGGER.warning(
+                f"WIDER FACE: main val aligned only {inline}/{total} GT images. "
+                "Set wider_val in data YAML or place images at WIDER_FACE/images/val under path."
+            )
+            return
+        model = getattr(self, "_val_model", None)
+        if model is None:
+            LOGGER.warning("WIDER FACE: sidecar skipped (no model reference)")
+            return
+        self._run_wider_sidecar_infer(model, inline, total)
+
+    def _run_wider_sidecar_infer(self, model: torch.nn.Module, inline: int, total: int) -> None:
+        """Inference-only pass on wider_val images to collect face detections for official AP."""
+        val_path = str(self.wider_val_dir)
+        LOGGER.info(f"WIDER FACE: sidecar inference on {val_path} (main val {inline}/{total} GT images)")
+        loader = self.get_dataloader(val_path, batch_size=self.args.batch)
+        n_before = len(self.wider_preds)
+        model.eval()
+        for batch in TQDM(loader, desc="WIDER sidecar", total=len(loader)):
+            batch = self.preprocess(batch)
+            preds = model(batch["img"], augment=False)
+            preds = self.postprocess(preds)
+            for si, pred in enumerate(preds):
+                pbatch = self._prepare_batch(si, batch)
+                predn = self._prepare_pred(pred)
+                predn_scaled = self.scale_preds(predn, pbatch)
+                self._collect_wider_preds(predn_scaled, pbatch)
+        LOGGER.info(f"WIDER FACE: sidecar added {len(self.wider_preds) - n_before} image keys (total {len(self.wider_preds)})")
 
     def _collect_wider_preds(self, predn: dict[str, torch.Tensor], pbatch: dict[str, Any]) -> None:
         """Collect face detections for WIDER FACE official evaluation."""
         im_file = Path(pbatch["im_file"])
-        if self.wider_image_filter not in im_file.as_posix():
-            return
         key = resolve_wider_event_stem(im_file, self.wider_stem_to_event)
         if key is None:
-            self.wider_unmapped_stems += 1
             return
         event, stem = key
         mask = predn["cls"] == self.wider_face_class
@@ -373,6 +433,11 @@ class DetectionValidator(BaseValidator):
     def eval_widerface(self) -> dict[str, float]:
         """Run WIDER FACE Easy/Medium/Hard AP using collected predictions."""
         if not self.wider_preds or self.wider_gt_dir is None:
+            if self.wider_eval_enabled and self.wider_gt_dir is not None and not self.wider_preds:
+                LOGGER.warning(
+                    "WIDER FACE: no predictions collected. "
+                    "Ensure wider_gt_dir MAT files exist and wider_val (default WIDER_FACE/images/val) is reachable."
+                )
             return {}
         try:
             if self.wider_unmapped_stems:

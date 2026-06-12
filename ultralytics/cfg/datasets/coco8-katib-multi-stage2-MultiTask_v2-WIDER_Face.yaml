@@ -34,7 +34,8 @@ class_weights: [0.55, 0.75, 1.0, 0.55, 1.0]
 # WIDER FACE 官方评测（val 结束后自动计算 Easy/Medium/Hard AP，写入 results.csv）
 # 需准备官方 GT：wider_face_val.mat + wider_easy/medium/hard_val.mat（见 WIDER 官网 eval_tools）
 wider_eval: true
-wider_gt_dir: WIDER_FACE/wider_face_split  # 相对 path；含四个 .mat 文件
+wider_gt_dir: WIDER_FACE/wider_face_split  # 相对 path；含四个 .mat，与 train/val 列表无关
 wider_face_class: 4                         # names 中 face 的类别 id
-wider_image_filter: WIDER_FACE        # 仅对 val 路径含该子串的图片做 WIDER 评测
-# wider_fitness: true                       # 用 Easy AP 作为 fitness（早停/最佳权重）；Katib 主目标可直读 metrics/wider_easy_ap
+# 本配置 val 已含 WIDER_FACE/images/val → 主 val 内联收集预测，无需 sidecar
+# wider_val: WIDER_FACE/images/val         # 可选；val 不含 WIDER 图时自动侧载推理此目录
+wider_fitness: true                       # 用 Easy AP 作为 fitness（早停/最佳权重）；Katib 主目标可直读 metrics/wider_easy_ap

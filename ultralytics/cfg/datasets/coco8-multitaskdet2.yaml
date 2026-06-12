@@ -35,7 +35,8 @@ class_weights: [0.55, 0.75, 1.0, 0.55, 1.0]
 wider_eval: true
 wider_gt_dir: WIDER_FACE/wider_face_split  # 相对 path；含四个 .mat 文件
 wider_face_class: 4                         # names 中 face 的类别 id
-wider_image_filter: WIDER_FACE-coco8        # 仅对 val 路径含该子串的图片做 WIDER 评测
+# val 含 WIDER_FACE-coco8/images/val → 按 GT stem 内联对齐；不足时侧载 wider_val
+# wider_val: WIDER_FACE-coco8/images/val
 # wider_fitness: true                       # 用 Easy AP 作为 fitness（早停/最佳权重）；Katib 主目标可直读 metrics/wider_easy_ap
 
 # Download script/URL (optional)

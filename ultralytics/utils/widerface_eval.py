@@ -331,3 +331,24 @@ def resolve_wider_gt_dir(data: dict[str, Any]) -> Path | None:
         if all((p / f).is_file() for f in REQUIRED_GT_FILES):
             return p
     return None
+
+
+def resolve_wider_val_dir(data: dict[str, Any]) -> Path | None:
+    """Resolve WIDER validation images for sidecar inference (independent of train/val YAML paths)."""
+    root = Path(data["path"])
+    raw = data.get("wider_val")
+    if raw:
+        p = Path(raw)
+        resolved = p.resolve() if p.is_absolute() else (root / raw).resolve()
+        return resolved if resolved.is_dir() else None
+    for candidate in ("WIDER_FACE/images/val", "WIDER_FACE-coco8/images/val"):
+        p = (root / candidate).resolve()
+        if p.is_dir():
+            return p
+    return None
+
+
+def wider_gt_image_count(gt_dir: str | Path) -> int:
+    """Return total number of official WIDER val images in GT MAT files."""
+    _, file_list, _, _ = _load_gt_mat_to_lists(Path(gt_dir))
+    return sum(len(stems) for stems in file_list)
